@@ -6,7 +6,7 @@
 
 ## Why this exists
 
-这个包最初只是 [`vue-page-store`](https://github.com/weijianjun/vue-page-store) 的 Vue 3 移植版 —— 一个 Vue 2 时代的页面级状态管理库。
+这个包最初只是 [`vue-page-store`](https://github.com/weijianjunwjj/vue-page-store) 的 Vue 3 移植版 —— 一个 Vue 2 时代的页面级状态管理库。
 
 但写到 v0.5 才意识到,这个库一直在做的事情并不是"管理状态",而是在管理一个完整的**页面作用域**:数据、派生值、异步 loading、定时器、事件总线、插件,全部绑定在页面的可见性生命周期上。
 
@@ -1027,7 +1027,7 @@ scope.$reset = () => {
 
 ## Related
 
-- [`vue-page-store`](https://github.com/weijianjun/vue-page-store) — 同一概念在 Vue 2 上的实现,本包的前身
+- [`vue-page-store`](https://github.com/weijianjunwjj/vue-page-store) — 同一概念在 Vue 2 上的实现,本包的前身
 
 ## Validation
 
