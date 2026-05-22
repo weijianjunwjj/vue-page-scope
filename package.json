@@ -1,0 +1,54 @@
+{
+  "name": "vue-page-scope",
+  "version": "0.1.0",
+  "description": "Vue 3 页面级 Scope —— 状态、副作用、生命周期，一个作用域全收",
+  "author": "weijianjun",
+  "license": "MIT",
+  "main": "dist/index.cjs.js",
+  "module": "dist/index.esm.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.esm.js",
+      "require": "./dist/index.cjs.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "rollup -c rollup.config.mjs && node -e \"require('fs').copyFileSync('src/index.d.ts','dist/index.d.ts')\"",
+    "prepublishOnly": "npm run build",
+    "release": "bash scripts/release.sh"
+  },
+  "peerDependencies": {
+    "vue": "^3.2.0"
+  },
+  "devDependencies": {
+    "rollup": "^4.0.0"
+  },
+  "keywords": [
+    "vue",
+    "vue3",
+    "scope",
+    "page-scope",
+    "state-management",
+    "effectScope",
+    "page-store",
+    "composition-api",
+    "micro-frontend"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/weijianjunwjj/vue-page-scope.git"
+  },
+  "bugs": {
+    "url": "https://github.com/weijianjunwjj/vue-page-scope/issues"
+  },
+  "homepage": "https://github.com/weijianjunwjj/vue-page-scope#readme",
+  "sideEffects": false
+}
