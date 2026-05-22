@@ -1,6 +1,6 @@
 {
   "name": "vue-page-scope",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Vue 3 页面级 Scope —— 状态、副作用、生命周期，一个作用域全收",
   "author": "weijianjun",
   "license": "MIT",
