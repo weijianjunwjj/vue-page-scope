@@ -68,6 +68,25 @@ export interface PageScopeBase<
   $off(event: string, handler?: (payload?: any) => void): void;
 
   $setInterval(fn: () => void, delay: number): () => void;
+
+  // ====== v0.2: 生命周期触发器(公共方法) ======
+  // 库内部仍会在 onMounted / onActivated / onDeactivated / onBeforeUnmount 自动调用
+  // 这些方法 —— Vue Router + keep-alive 场景行为与 v0.1 完全一致.
+  //
+  // 跨运行时 adapter(如 uni-app 小程序)可以在 onPageShow / onPageHide / onLoad /
+  // onUnload 等宿主生命周期里显式调用这些方法,驱动 scope 进入对应状态.
+  //
+  // 幂等性:
+  // - $init: 同一 scope 多次调用, options.init 只执行一次.
+  // - $enter: 已 enter 状态下 no-op.
+  // - $leave: 未 enter 状态下 no-op.
+  /** 手动触发 options.init,幂等 */
+  $init(): void;
+  /** 手动触发 options.enter,已 enter 时 no-op */
+  $enter(): void;
+  /** 手动触发 options.leave,未 enter 时 no-op */
+  $leave(): void;
+
   $destroy(): void;
 }
 

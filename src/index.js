@@ -36,6 +36,8 @@ import {
   getCurrentInstance,
 } from 'vue';
 
+import { createLifecycleController } from './lifecycle-controller.js';
+
 // ====== dev-only warning ======
 // 沿用 vue-page-store v0.5.1 的 try/catch 兜底,Vite / webpack 5 等不 polyfill process 的环境
 var isDev = false;
@@ -436,41 +438,31 @@ function createPageScopeInstance(id, options, instance, injected) {
     _intervals.length = 0;
   }
 
-  // ====== enter / leave / init 控制(闭包函数,不挂在 scope 上) ======
-  var enterHook = typeof options.enter === 'function' ? options.enter : null;
-  var leaveHook = typeof options.leave === 'function' ? options.leave : null;
-  var _entered = false;
-
-  function runEnter() {
-    if (_entered || scope.$disposed) return;
-    _entered = true;
-    scope.$status.mounted = true;
-    scope.$status.active = true;
-    if (enterHook) enterHook.call(scope);
-    scope.$emit('page:enter');
-    _pluginHooks.forEach(function (h) { if (h.enter) h.enter(); });
-  }
-
-  function runLeave() {
-    if (!_entered) return;
-    clearAllIntervals();
-    _entered = false;
-    scope.$status.active = false;
-    if (leaveHook) leaveHook.call(scope);
-    scope.$emit('page:leave');
-    _pluginHooks.forEach(function (h) { if (h.leave) h.leave(); });
-  }
-
+  // ====== enter / leave / init 控制 ======
+  // v0.2 起,生命周期触发器由 createLifecycleController 统一管理,并通过
+  // scope.$init / scope.$enter / scope.$leave 暴露为公共方法.
+  //
+  // v0.1 行为保留: 库内部仍在 onMounted / onActivated / onDeactivated /
+  // onBeforeUnmount 自动调用这些方法,Vue Router + keep-alive 场景用法不变.
+  //
+  // 新增能力: 跨运行时 adapter(如 uni-app 小程序 onPageShow/onPageHide)可以
+  // 直接调用 scope.$enter() / scope.$leave() 显式驱动生命周期.
+  //
   // init 包进 effectScopeRef.run —— 用户即使在 init 里手写 watch,
   // 这些 watch 也会被 scope.stop() 自动回收.
   // 但 README 仍应明确:init 只用于一次性初始化(拉字典、注册事件监听等),
   // 响应式副作用请用声明式的 watch option.
-  function runInit() {
-    if (typeof options.init !== 'function') return;
-    effectScopeRef.run(function () {
-      options.init.call(scope);
-    });
-  }
+  var controller = createLifecycleController({
+    scope: scope,
+    options: options,
+    effectScopeRef: effectScopeRef,
+    pluginHooks: _pluginHooks,
+    clearAllIntervals: clearAllIntervals,
+  });
+
+  scope.$init = controller.runInit;
+  scope.$enter = controller.runEnter;
+  scope.$leave = controller.runLeave;
 
   // ====== $destroy ======
   scope.$destroy = function () {
@@ -505,14 +497,11 @@ function createPageScopeInstance(id, options, instance, injected) {
     });
   });
 
-  // 返回 scope 本身 + 三个内部生命周期触发器
-  // (触发器不挂在 scope 上,只在 useScope() 内通过闭包访问)
-  return {
-    scope: scope,
-    runInit: runInit,
-    runEnter: runEnter,
-    runLeave: runLeave,
-  };
+  // 返回 scope.
+  // v0.1 中三个生命周期触发器是闭包私有的; v0.2 起统一通过 scope.$init /
+  // scope.$enter / scope.$leave 暴露为公共方法, 不再需要从 createPageScopeInstance
+  // 单独返回. 库内部 useScope() 直接调用 scope.$xxx, 行为与 v0.1 一致.
+  return { scope: scope };
 }
 
 // ====== definePageScope ======
@@ -550,8 +539,6 @@ function definePageScope(id, options) {
 
     var scope;
     var isFirstBinding = false;
-    // 仅首次创建时持有内部生命周期触发器,非首次绑定不需要
-    var created = null;
 
     if (scopeRegistry.has(id)) {
       scope = scopeRegistry.get(id);
@@ -566,7 +553,7 @@ function definePageScope(id, options) {
       // instance + injected 传给 createPageScopeInstance ——
       // auto bridge 和 explicit injection 必须在 scope 内部完成,
       // 时序上要早于 getters / actions / watch / plugin install / init.
-      created = createPageScopeInstance(id, options, instance, injected);
+      var created = createPageScopeInstance(id, options, instance, injected);
       scope = created.scope;
       scopeRegistry.set(id, scope);
       isFirstBinding = true;
@@ -577,7 +564,7 @@ function definePageScope(id, options) {
       // 防御:init 抛错时自毁 scope,避免 registry 里残留半初始化的 scope.
       // $destroy 会触发 effectScope.stop / plugin destroy hooks / registry.delete.
       try {
-        created.runInit();
+        scope.$init();
       } catch (err) {
         scope.$destroy();
         throw err;
@@ -592,12 +579,13 @@ function definePageScope(id, options) {
 
       // onMounted + onActivated 双挂,用 _entered 状态机去重
       // 处理 keep-alive 首次激活时 onMounted 和 onActivated 双响炮的情况
-      onMounted(function () { created.runEnter(); });
-      onActivated(function () { created.runEnter(); });
-      onDeactivated(function () { created.runLeave(); });
+      // v0.2 起统一调用 scope.$enter / scope.$leave 公共方法 —— 行为与 v0.1 一致.
+      onMounted(function () { scope.$enter(); });
+      onActivated(function () { scope.$enter(); });
+      onDeactivated(function () { scope.$leave(); });
 
       onBeforeUnmount(function () {
-        created.runLeave();
+        scope.$leave();
         scope.$destroy();
       });
     } else {
