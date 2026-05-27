@@ -33,6 +33,18 @@ adapters, not just Vue component lifecycle hooks.
   - `$destroy`: runs once; if currently `entered`, auto-runs `$leave` (firing
     the leave hook / `page:leave` / plugin leave hooks) before stopping the
     effectScope
+- Context channel: `options.context?: T | Ref<T> | (() => T)` + `scope.$getContext()`
+  - New `ScopeContextSource<C>` and `ResolveContext<X>` type exports; a new
+    trailing `C` generic threads the resolved context type through
+    `PageScope` / `PageScopeBase` / `DefinePageScopeOptions` / `definePageScope`
+  - `$getContext()` resolves the source lazily on every call (no caching), so
+    `Ref` / getter forms always reflect the latest value
+  - Returns `undefined` when `context` is unset or after the scope is destroyed
+    (with a dev warning in the destroyed case)
+  - When called inside a reactive context (watch / computed), it collects the
+    reactive dependencies read by the getter — by design; use `untrack()` to opt out
+  - A throwing getter is **not** swallowed; the error propagates so real bugs
+    surface immediately rather than degrading to a downstream null access
 
 ### Changed
 
@@ -50,6 +62,10 @@ adapters, not just Vue component lifecycle hooks.
 - All v0.1 user code continues to work unchanged
 - New API is additive only
 - Omitting `lifecycle` defaults to `'auto'`, behaving exactly as v0.1
+- `options.context` 与 v0.1 injected 路径互不干扰:
+  前者通过 `scope.$getContext()` 访问,
+  后者继续通过 `scope.<key>` 顶层访问。
+  两者可并存,无覆盖关系。
 
 ## [0.1.1] - 2026
 

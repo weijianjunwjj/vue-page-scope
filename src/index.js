@@ -34,6 +34,7 @@ import {
   onDeactivated,
   onBeforeUnmount,
   getCurrentInstance,
+  isRef,
 } from 'vue';
 
 import { createLifecycleController } from './lifecycle-controller.js';
@@ -465,6 +466,32 @@ function createPageScopeInstance(id, options, instance, injected) {
   scope.$init = controller.runInit;
   scope.$enter = controller.runEnter;
   scope.$leave = controller.runLeave;
+
+  // ====== $getContext —— context 通道 (v0.2) ======
+  // 解析 options.context 的三种形态为 C:
+  //   () => T  -> 调用取值     (函数一律视为 getter)
+  //   Ref<T>   -> 解包 .value
+  //   T        -> 原样返回     (reactive(T) 走此分支,本就是 T 形状)
+  // 惰性 resolve,每次调用都重新读取,不缓存 —— Ref / getter 始终反映最新值.
+  // 时机:此处早于 useScope 驱动的 $init() 与任何 onMounted/$enter,init/enter/leave 内可调.
+  function resolveContext(src) {
+    if (typeof src === 'function') return src();
+    if (isRef(src)) return src.value;
+    return src;
+  }
+
+  scope.$getContext = function () {
+    // destroyed 后返回 undefined(诚实的"无上下文"信号,避免销毁后异步回调误用 stale).
+    if (scope.$disposed) {
+      warn('scope "' + id + '" 已销毁,$getContext() 返回 undefined');
+      return undefined;
+    }
+    if (options.context === undefined) return undefined;
+    // 不 try/catch:getter 抛错说明上下文从根上有问题,让错误正常上抛,
+    // 不把真 bug 推迟到下游空指针.也不主动 untrack —— 响应式上下文内调用
+    // 收集依赖是用户的合理预期(context 变了应重触发 watch).
+    return resolveContext(options.context);
+  };
 
   // ====== $destroy ======
   // 幂等:只执行一次(再次调用直接返回).
