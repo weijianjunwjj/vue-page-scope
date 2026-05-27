@@ -130,6 +130,15 @@ export interface PageScopePlugin<
   };
 }
 
+// ====== 生命周期模式 (v0.2) ======
+// 'auto' (默认): 库注册 Vue 组件生命周期 hook,自动驱动 init/enter/leave/destroy.
+//                Vue Router + keep-alive 场景,行为与 v0.1 完全一致.
+// 'manual':      库一律不注册任何 Vue 生命周期 hook,也不自动 init.
+//                $init / $enter / $leave / $destroy 全部由 adapter 显式调用.
+//                适用于 uni-app 小程序 / 微前端 / 自研路由等需要外部接管生命周期的场景.
+// 模式名保持运行时无关,不绑定任何具体宿主语义.
+export type ScopeLifecycleMode = 'auto' | 'manual';
+
 // ====== definePageScope options ======
 export interface DefinePageScopeOptions<
   S extends AnyRecord,
@@ -141,6 +150,9 @@ export interface DefinePageScopeOptions<
 > {
   /** 业务状态工厂函数(必填) */
   state(): S;
+
+  /** 生命周期模式,默认 'auto'.见 ScopeLifecycleMode. */
+  lifecycle?: ScopeLifecycleMode;
 
   /** 页面输入 / 原始返回工厂函数 */
   source?(): SO;

@@ -557,37 +557,44 @@ function definePageScope(id, options) {
       scope = created.scope;
       scopeRegistry.set(id, scope);
       isFirstBinding = true;
-
-      // init 钩子 —— 只在 scope 首次创建时调用,与 vue-page-store v0.5 语义一致.
-      // 已包进 effectScopeRef.run,init 里手写的 watch 也会被 scope.stop() 回收.
-      //
-      // 防御:init 抛错时自毁 scope,避免 registry 里残留半初始化的 scope.
-      // $destroy 会触发 effectScope.stop / plugin destroy hooks / registry.delete.
-      try {
-        scope.$init();
-      } catch (err) {
-        scope.$destroy();
-        throw err;
-      }
     }
 
     // ====== 生命周期绑定 —— 单 owner 模型 ======
     // 仅首次绑定的组件挂生命周期钩子.
     // 子组件如果误调 useXxxScope(),会收到 warning,且不会触发重复 enter/leave.
     if (isFirstBinding) {
+      // ====== 生命周期模式 (v0.2): 'auto' (默认) | 'manual' ======
+      // 一个开关控制所有"自动行为",保持清晰边界(不在每个 hook 内单独判断):
+      //   auto   —— 自动调用 $init,并注册 onMounted/onActivated/onDeactivated/
+      //             onBeforeUnmount 自动驱动 $enter/$leave/$destroy. 行为与 v0.1 完全一致.
+      //   manual —— 库一律不注册任何 Vue 生命周期 hook,也不自动 $init.
+      //             scope 创建即可用(plugin 已就绪),但 $init/$enter/$leave/$destroy
+      //             全部等 adapter 显式调用.即使开发者混用,Vue hook 也不会偷偷触发.
+      // 注意:provide 不在开关内 —— 子组件 injectPageScope() 在两种模式下都要能用.
+      if (options.lifecycle !== 'manual') {
+        // init 钩子 —— 只在 scope 首次创建时调用,与 vue-page-store v0.5 语义一致.
+        // 已包进 effectScopeRef.run,init 里手写的 watch 也会被 scope.stop() 回收.
+        // 防御:init 抛错时自毁 scope,避免 registry 里残留半初始化的 scope.
+        try {
+          scope.$init();
+        } catch (err) {
+          scope.$destroy();
+          throw err;
+        }
+
+        // onMounted + onActivated 双挂,用 _entered 状态机去重
+        // 处理 keep-alive 首次激活时 onMounted 和 onActivated 双响炮的情况
+        onMounted(function () { scope.$enter(); });
+        onActivated(function () { scope.$enter(); });
+        onDeactivated(function () { scope.$leave(); });
+
+        onBeforeUnmount(function () {
+          scope.$leave();
+          scope.$destroy();
+        });
+      }
+
       provide(PAGE_SCOPE_KEY, scope);
-
-      // onMounted + onActivated 双挂,用 _entered 状态机去重
-      // 处理 keep-alive 首次激活时 onMounted 和 onActivated 双响炮的情况
-      // v0.2 起统一调用 scope.$enter / scope.$leave 公共方法 —— 行为与 v0.1 一致.
-      onMounted(function () { scope.$enter(); });
-      onActivated(function () { scope.$enter(); });
-      onDeactivated(function () { scope.$leave(); });
-
-      onBeforeUnmount(function () {
-        scope.$leave();
-        scope.$destroy();
-      });
     } else {
       warn(
         'scope "' + id + '" 已存在.useXxxScope() 建议只在页面级组件调用,' +
