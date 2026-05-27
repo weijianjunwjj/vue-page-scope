@@ -76,17 +76,20 @@ export interface PageScopeBase<
   // 跨运行时 adapter(如 uni-app 小程序)可以在 onPageShow / onPageHide / onLoad /
   // onUnload 等宿主生命周期里显式调用这些方法,驱动 scope 进入对应状态.
   //
-  // 幂等性:
-  // - $init: 同一 scope 多次调用, options.init 只执行一次.
-  // - $enter: 已 enter 状态下 no-op.
-  // - $leave: 未 enter 状态下 no-op.
-  /** 手动触发 options.init,幂等 */
+  // 状态机: created → inited → entered ⇄ left → destroyed
+  // 幂等规则:
+  // - $init: options.init 只执行一次,重复调用 dev warning 并忽略.
+  // - $enter: destroyed 后无效; 已 entered 时忽略.
+  // - $leave: 仅 entered 状态触发,其他状态忽略.
+  // - $destroy: 只执行一次; 若当前 entered 会自动先 $leave 再释放 effectScope.
+  /** 手动触发 options.init,只执行一次,重复调用 dev warning */
   $init(): void;
-  /** 手动触发 options.enter,已 enter 时 no-op */
+  /** 手动触发 options.enter,destroyed 后无效,已 enter 时 no-op */
   $enter(): void;
-  /** 手动触发 options.leave,未 enter 时 no-op */
+  /** 手动触发 options.leave,仅 entered 状态触发,其他状态 no-op */
   $leave(): void;
 
+  /** 销毁 scope,只执行一次; 若当前 entered 自动先 $leave,再释放 effectScope */
   $destroy(): void;
 }
 

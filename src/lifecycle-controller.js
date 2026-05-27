@@ -13,11 +13,24 @@
  *   把触发器从闭包暴露到 scope.$method, 是最小代价的扩展. v0.1 的 Vue Router 用法
  *   仍由库内部自动绑定调用 scope.$enter, 行为 100% 不变.
  *
- * 幂等性约定:
- *   - $init: 同一 scope 多次调用, options.init 只执行一次. v0.1 内部也只调用一次,
- *           新增 _initialized 守卫不会改变 v0.1 行为.
- *   - $enter: _entered 状态机去重. 与 v0.1 完全一致.
- *   - $leave: 未 enter 状态下 no-op. 与 v0.1 完全一致.
+ * 状态机 (v0.2 Step 3 形式化):
+ *
+ *     created → inited → entered ⇄ left → destroyed
+ *
+ *   用 _initialized / _entered 两个布尔标志 + scope.$disposed 编码:
+ *     created  : !_initialized && !_entered && !$disposed
+ *     inited   :  _initialized && !_entered && !$disposed
+ *     entered  :  _entered                  && !$disposed
+ *     left     :  _initialized && !_entered && !$disposed (entered 之后再 leave)
+ *     destroyed:  $disposed
+ *   注: inited 与 left 行为等价(都是"非 entered、非 destroyed、可再 enter"),
+ *       因此无需第三个标志区分.
+ *
+ * 幂等规则:
+ *   - $init  : 只执行一次. 重复调用 dev warning 并忽略. destroyed 后调用同样忽略.
+ *   - $enter : destroyed 后无效(忽略); 已 entered 时忽略; 其余状态 → entered.
+ *   - $leave : 仅 entered 状态触发; 其他状态忽略.
+ *   - $destroy: 见 index.js —— 只执行一次; 若当前 entered 自动先 $leave 再 stop effectScope.
  *
  * 与 effectScope 的关系:
  *   - init hook 仍然包进 effectScopeRef.run, init 里手写的 watch 仍由 scope.stop() 回收.
@@ -30,6 +43,8 @@ export function createLifecycleController(deps) {
   var effectScopeRef = deps.effectScopeRef;
   var pluginHooks = deps.pluginHooks;
   var clearAllIntervals = deps.clearAllIntervals;
+  var warn = deps.warn;
+  var id = deps.id;
 
   var initHook = typeof options.init === 'function' ? options.init : null;
   var enterHook = typeof options.enter === 'function' ? options.enter : null;
@@ -39,7 +54,14 @@ export function createLifecycleController(deps) {
   var _entered = false;
 
   function runInit() {
-    if (_initialized || scope.$disposed) return;
+    if (scope.$disposed) {
+      warn('scope "' + id + '" 已销毁,$init 调用被忽略');
+      return;
+    }
+    if (_initialized) {
+      warn('scope "' + id + '" $init 只能调用一次,本次重复调用被忽略');
+      return;
+    }
     _initialized = true;
     if (!initHook) return;
     effectScopeRef.run(function () {
@@ -48,7 +70,8 @@ export function createLifecycleController(deps) {
   }
 
   function runEnter() {
-    if (_entered || scope.$disposed) return;
+    // destroyed 后无效; 已 entered 时忽略.
+    if (scope.$disposed || _entered) return;
     _entered = true;
     scope.$status.mounted = true;
     scope.$status.active = true;
@@ -60,6 +83,7 @@ export function createLifecycleController(deps) {
   }
 
   function runLeave() {
+    // 仅 entered 状态触发; 其他状态(created / inited / left / destroyed)忽略.
     if (!_entered) return;
     clearAllIntervals();
     _entered = false;
@@ -75,5 +99,7 @@ export function createLifecycleController(deps) {
     runInit: runInit,
     runEnter: runEnter,
     runLeave: runLeave,
+    // 供 $destroy 判断"当前是否 entered",以决定是否自动先 $leave.
+    isEntered: function () { return _entered; },
   };
 }

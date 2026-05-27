@@ -25,6 +25,14 @@ adapters, not just Vue component lifecycle hooks.
     `$init`. The scope is usable on creation (plugins installed), but
     `$init` / `$enter` / `$leave` / `$destroy` are all driven explicitly by an
     adapter. Mode names stay runtime-agnostic (no host-specific semantics).
+- Formalized lifecycle state machine with explicit idempotency rules:
+  `created → inited → entered ⇄ left → destroyed`
+  - `$init`: runs once; repeated calls emit a dev warning and are ignored
+  - `$enter`: invalid after `destroyed`; ignored when already `entered`
+  - `$leave`: only fires from `entered`; ignored in any other state
+  - `$destroy`: runs once; if currently `entered`, auto-runs `$leave` (firing
+    the leave hook / `page:leave` / plugin leave hooks) before stopping the
+    effectScope
 
 ### Changed
 

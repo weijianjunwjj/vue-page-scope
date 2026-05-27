@@ -458,6 +458,8 @@ function createPageScopeInstance(id, options, instance, injected) {
     effectScopeRef: effectScopeRef,
     pluginHooks: _pluginHooks,
     clearAllIntervals: clearAllIntervals,
+    warn: warn,
+    id: id,
   });
 
   scope.$init = controller.runInit;
@@ -465,8 +467,14 @@ function createPageScopeInstance(id, options, instance, injected) {
   scope.$leave = controller.runLeave;
 
   // ====== $destroy ======
+  // 幂等:只执行一次(再次调用直接返回).
+  // 若当前 entered,自动先 $leave —— 触发 leave hook / page:leave / plugin leave,
+  // 保证 entered → destroyed 不会跳过 leave 语义.之后再 stop effectScope.
   scope.$destroy = function () {
     if (scope.$disposed) return;
+    if (controller.isEntered()) {
+      controller.runLeave();
+    }
     scope.$status.mounted = false;
     scope.$status.active = false;
     clearAllIntervals();
