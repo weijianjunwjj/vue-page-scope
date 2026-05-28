@@ -4,9 +4,9 @@ All notable changes to this project will be documented in this file. The
 format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased] - v0.2-alpha-uniapp-spike
+## [0.2.0-alpha.1] - 2026-05-28
 
-This is an in-progress alpha release driven by uni-app miniapp adapter
+This alpha release is driven by uni-app miniapp adapter
 requirements from the Activity Config Miniapp project. The goal is to make
 vue-page-scope runtime-agnostic so its lifecycle can be controlled by
 adapters, not just Vue component lifecycle hooks.
