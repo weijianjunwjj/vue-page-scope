@@ -513,7 +513,11 @@ function createPageScopeInstance(id, options, instance, injected) {
     // effectScope.stop() 一键释放所有 watch / computed
     // (包括 plugin 内创建的 —— 因为 plugin install 也在 effectScope 内)
     effectScopeRef.stop();
-    scopeRegistry.delete(id);
+    // self-evict: 销毁链尾部(leave → stop → disposed → evict)从 registry 摘除自己.
+    // cached === scope 守卫不能省 —— 只删自己这个实例,防止删掉已被新实例顶替的
+    // 同 id 条目(否则 destroy 旧 scope 会误删 registry 里的新 scope).
+    var cached = scopeRegistry.get(id);
+    if (cached === scope) scopeRegistry.delete(id);
   };
 
   // ====== 第二阶段:plugin 安装 ======
@@ -575,8 +579,17 @@ function definePageScope(id, options) {
     var scope;
     var isFirstBinding = false;
 
-    if (scopeRegistry.has(id)) {
-      scope = scopeRegistry.get(id);
+    var cachedScope = scopeRegistry.has(id) ? scopeRegistry.get(id) : null;
+    // 命中缓存但已销毁:摘除旧条目,走重建分支拿全新 scope.
+    // (registry 缓存 + $destroy 摘除存在时序窗口 —— 若 cached 已 disposed,
+    // 复用它只会得到一个被冻结的死 scope,故视同未命中.)
+    if (cachedScope && cachedScope.$disposed) {
+      scopeRegistry.delete(id);
+      cachedScope = null;
+    }
+
+    if (cachedScope) {
+      scope = cachedScope;
       // 非首次绑定时如果还传了 injected,提示用户:注入只在 owner 处生效
       if (injected && Object.keys(injected).length > 0) {
         warn(

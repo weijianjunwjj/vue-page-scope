@@ -46,6 +46,23 @@ adapters, not just Vue component lifecycle hooks.
   - A throwing getter is **not** swallowed; the error propagates so real bugs
     surface immediately rather than degrading to a downstream null access
 
+### Fixed
+
+- `definePageScope` no longer returns a disposed scope; `$destroy` self-evicts
+  from the registry
+  - Two-layer defense against the disposed-reuse hazard (registry caches by id,
+    but a destroyed scope used to linger):
+    1. `definePageScope(id)`: on a cache hit, if `cached.$disposed` is true,
+       delete the stale entry and rebuild a fresh scope; an active cached scope
+       is returned as before.
+    2. `$destroy`: after marking `$disposed = true`, self-evict from the
+       registry guarded by `cached === scope` — only the instance removes its
+       own entry, so destroying an old scope never deletes a same-id entry that
+       a newer instance has already taken over.
+  - The `if (controller.isEntered()) runLeave()` branch is unchanged; eviction
+    is appended at the tail of the destroy chain (leave → stop → disposed →
+    evict), kept separate from the `isEntered` logic.
+
 ### Changed
 
 - Internal: `createPageScopeInstance` now delegates lifecycle to
