@@ -62,6 +62,8 @@ adapters, not just Vue component lifecycle hooks.
   - The `if (controller.isEntered()) runLeave()` branch is unchanged; eviction
     is appended at the tail of the destroy chain (leave → stop → disposed →
     evict), kept separate from the `isEntered` logic.
+  - This fix does not cover routeSignature keyed instances or concurrent
+    same-id scopes; that remains deferred as D-4.
 
 ### Changed
 
