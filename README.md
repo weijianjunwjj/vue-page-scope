@@ -227,6 +227,8 @@ pageScope.search()
 | `init` | `function` | scope 创建后一次性调用 |
 | `enter` | `function` | 页面进入可见 / 可交互状态时触发 |
 | `leave` | `function` | 页面离开可见 / 可交互状态时触发 |
+| `lifecycle` | `'auto' \| 'manual'` | **v0.2**，生命周期模式，默认 `'auto'`。见 [跨运行时](#跨运行时lifecycle-模式--context-通道-v02) |
+| `context` | `T \| Ref<T> \| (() => T)` | **v0.2**，适配器上下文,通过 `scope.$getContext()` 惰性读取 |
 | *其它字段* | *any* | 注册过的 plugin 可声明自己的字段 |
 
 ### `injectPageScope()`
@@ -254,7 +256,11 @@ pageScope.search()
 | `scope.$emit(event, payload)` | 发射事件(当前 scope 作用域) |
 | `scope.$on(event, handler)` | 订阅事件,返回取消函数 |
 | `scope.$off(event, handler?)` | 取消订阅 |
-| `scope.$destroy()` | 手动销毁(通常不需要主动调用,owner unmount 时自动触发) |
+| `scope.$destroy()` | 手动销毁(auto 模式 owner unmount 自动触发;manual 模式由 adapter 调) |
+| `scope.$init()` | **v0.2** 手动触发 init(manual 模式 / 跨运行时 adapter 用;auto 模式库自动调) |
+| `scope.$enter()` | **v0.2** 手动触发 enter(同上) |
+| `scope.$leave()` | **v0.2** 手动触发 leave(同上) |
+| `scope.$getContext()` | **v0.2** 惰性解析 `options.context`;未配置或 destroyed 后返回 `undefined` |
 
 ### watch 配置
 
@@ -389,6 +395,69 @@ leave() {
   // interval 自动清理
 }
 ```
+
+---
+
+## 跨运行时:lifecycle 模式 & context 通道 (v0.2)
+
+v0.1 的生命周期完全绑在 Vue 组件钩子上(`onMounted / onActivated / ...`)。但小程序、微前端、自研路由这些运行时**不走 Vue 组件钩子**,所以 v0.2 把生命周期的「触发」与「Vue 钩子」解耦。
+
+### lifecycle 模式
+
+| 模式 | 行为 |
+|---|---|
+| `'auto'`(默认) | 库注册 Vue 钩子 + 自动 `$init`,**与 v0.1 完全一致**。web 项目什么都不用改 |
+| `'manual'` | 库**不注册任何 Vue 钩子、不自动 init**。scope 创建即可用(plugin 已就绪),但 `$init / $enter / $leave / $destroy` 全部由 adapter 显式调 |
+
+```js
+const scope = definePageScope('apply', {
+  lifecycle: 'manual',
+  // ...
+})()
+
+// adapter 把宿主生命周期翻译成 scope 方法(以 uni-app 小程序为例):
+onLoad((query) => { /* 存 query */ scope.$init() })
+onShow(()      => scope.$enter())
+onHide(()      => scope.$leave())
+onUnload(()    => scope.$destroy())
+```
+
+### 状态机 & 幂等
+
+manual 模式下幂等由库的状态机保证,adapter 不必自己排队:
+
+```
+created → inited → entered ⇄ left → destroyed
+```
+
+- `$init` 只执行一次(重复调用 dev warning)
+- `$enter` destroyed 后无效、已 entered 时忽略
+- `$leave` 仅 entered 状态触发
+- `$destroy` 只执行一次;若当前 entered,**自动先补一次 `$leave`** 再 stop effectScope
+
+### context 通道
+
+小程序的路由参数要到 `onLoad` 才拿得到,setup 阶段是空的。`options.context` + `$getContext()` 用**惰性求值**解决这个时序:
+
+```js
+import { shallowRef } from 'vue'
+const pageQuery = shallowRef({})           // setup 阶段还是空 {}
+
+const scope = definePageScope('apply', {
+  lifecycle: 'manual',
+  context: () => pageQuery.value,          // 存 getter,不急切求值
+  init() {
+    const q = this.$getContext() || {}     // init 触发那刻才读,此时 query 已就位
+    this.$source.activityId = q.activityId
+  },
+})()
+
+onLoad((query) => { pageQuery.value = query; scope.$init() })
+```
+
+`$getContext()` 每次调用都重新解析(不缓存),所以 `Ref` / getter 形态始终反映最新值;未配置 `context` 或 scope 已 destroyed 时返回 `undefined`。它与 v0.1 的 `injected` 注入互不干扰——前者走 `$getContext()`,后者走 `scope.<key>` 顶层访问,可并存。
+
+> auto(web)路径行为不变,有 Vitest 回归套件钉死;manual(小程序)路径由真机 spike 验证。完整的 uni-app adapter 实战(四个页面钩子翻译 + 真机踩坑)见 Activity Config Miniapp 项目。
 
 ---
 
@@ -947,27 +1016,31 @@ scope.$destroy = () => {
 
 ```js
 function useScope() {
-  if (scopeRegistry.has(id)) {
-    return scopeRegistry.get(id)  // 复用,不挂生命周期
-  }
-  // 首次创建 —— 当前组件成为 owner
-  const { scope, runInit, runEnter, runLeave } = createPageScopeInstance(id, options)
+  // 命中缓存:active 复用;已 disposed 则摘除重建(v0.2 disposed-reuse 修复)
+  let cached = scopeRegistry.get(id)
+  if (cached && cached.$disposed) { scopeRegistry.delete(id); cached = null }
+  if (cached) return cached  // 复用,不挂生命周期
+
+  // 首次创建 —— 当前组件成为 owner。$init/$enter/$leave 已挂在 scope 上。
+  const { scope } = createPageScopeInstance(id, options)
   scopeRegistry.set(id, scope)
 
-  // init 抛错时自毁,避免 registry 残留半初始化的 scope
-  try { runInit() } catch (err) { scope.$destroy(); throw err }
+  // v0.2:auto 模式才注册 Vue 钩子 + 自动 init;manual 模式全部交给 adapter。
+  if (options.lifecycle !== 'manual') {
+    // init 抛错时自毁,避免 registry 残留半初始化的 scope
+    try { scope.$init() } catch (err) { scope.$destroy(); throw err }
+    onMounted(scope.$enter)
+    onActivated(scope.$enter)     // keep-alive 切回
+    onDeactivated(scope.$leave)   // keep-alive 切走
+    onBeforeUnmount(() => { scope.$leave(); scope.$destroy() })
+  }
 
-  provide('pageScope', scope)
-  onMounted(runEnter)
-  onActivated(runEnter)     // keep-alive 切回
-  onDeactivated(runLeave)   // keep-alive 切走
-  onBeforeUnmount(() => { runLeave(); scope.$destroy() })
-
+  provide('pageScope', scope)  // provide 在开关外,两种模式子组件都能 inject
   return scope
 }
 ```
 
-`runInit / runEnter / runLeave` 在 `createPageScopeInstance` 内部以闭包形式存在,**不挂在 scope 实例上**。外部只能看到公开的 `$state / $patch / $emit / ...` 等 API。
+v0.2 起,`$init / $enter / $leave` 由 `lifecycle-controller` 统一管理并**公开为 scope 方法**(v0.1 是闭包私有的)。`'auto'` 模式下库内部自动调用它们、行为与 v0.1 一致;`'manual'` 模式留给跨运行时 adapter 显式驱动。
 
 ### State 顶层代理
 
