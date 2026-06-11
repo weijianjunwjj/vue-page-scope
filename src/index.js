@@ -34,7 +34,10 @@ import {
   onDeactivated,
   onBeforeUnmount,
   getCurrentInstance,
+  isRef,
 } from 'vue';
+
+import { createLifecycleController } from './lifecycle-controller.js';
 
 // ====== dev-only warning ======
 // 沿用 vue-page-store v0.5.1 的 try/catch 兜底,Vite / webpack 5 等不 polyfill process 的环境
@@ -436,45 +439,69 @@ function createPageScopeInstance(id, options, instance, injected) {
     _intervals.length = 0;
   }
 
-  // ====== enter / leave / init 控制(闭包函数,不挂在 scope 上) ======
-  var enterHook = typeof options.enter === 'function' ? options.enter : null;
-  var leaveHook = typeof options.leave === 'function' ? options.leave : null;
-  var _entered = false;
-
-  function runEnter() {
-    if (_entered || scope.$disposed) return;
-    _entered = true;
-    scope.$status.mounted = true;
-    scope.$status.active = true;
-    if (enterHook) enterHook.call(scope);
-    scope.$emit('page:enter');
-    _pluginHooks.forEach(function (h) { if (h.enter) h.enter(); });
-  }
-
-  function runLeave() {
-    if (!_entered) return;
-    clearAllIntervals();
-    _entered = false;
-    scope.$status.active = false;
-    if (leaveHook) leaveHook.call(scope);
-    scope.$emit('page:leave');
-    _pluginHooks.forEach(function (h) { if (h.leave) h.leave(); });
-  }
-
+  // ====== enter / leave / init 控制 ======
+  // v0.2 起,生命周期触发器由 createLifecycleController 统一管理,并通过
+  // scope.$init / scope.$enter / scope.$leave 暴露为公共方法.
+  //
+  // v0.1 行为保留: 库内部仍在 onMounted / onActivated / onDeactivated /
+  // onBeforeUnmount 自动调用这些方法,Vue Router + keep-alive 场景用法不变.
+  //
+  // 新增能力: 跨运行时 adapter(如 uni-app 小程序 onPageShow/onPageHide)可以
+  // 直接调用 scope.$enter() / scope.$leave() 显式驱动生命周期.
+  //
   // init 包进 effectScopeRef.run —— 用户即使在 init 里手写 watch,
   // 这些 watch 也会被 scope.stop() 自动回收.
   // 但 README 仍应明确:init 只用于一次性初始化(拉字典、注册事件监听等),
   // 响应式副作用请用声明式的 watch option.
-  function runInit() {
-    if (typeof options.init !== 'function') return;
-    effectScopeRef.run(function () {
-      options.init.call(scope);
-    });
+  var controller = createLifecycleController({
+    scope: scope,
+    options: options,
+    effectScopeRef: effectScopeRef,
+    pluginHooks: _pluginHooks,
+    clearAllIntervals: clearAllIntervals,
+    warn: warn,
+    id: id,
+  });
+
+  scope.$init = controller.runInit;
+  scope.$enter = controller.runEnter;
+  scope.$leave = controller.runLeave;
+
+  // ====== $getContext —— context 通道 (v0.2) ======
+  // 解析 options.context 的三种形态为 C:
+  //   () => T  -> 调用取值     (函数一律视为 getter)
+  //   Ref<T>   -> 解包 .value
+  //   T        -> 原样返回     (reactive(T) 走此分支,本就是 T 形状)
+  // 惰性 resolve,每次调用都重新读取,不缓存 —— Ref / getter 始终反映最新值.
+  // 时机:此处早于 useScope 驱动的 $init() 与任何 onMounted/$enter,init/enter/leave 内可调.
+  function resolveContext(src) {
+    if (typeof src === 'function') return src();
+    if (isRef(src)) return src.value;
+    return src;
   }
 
+  scope.$getContext = function () {
+    // destroyed 后返回 undefined(诚实的"无上下文"信号,避免销毁后异步回调误用 stale).
+    if (scope.$disposed) {
+      warn('scope "' + id + '" 已销毁,$getContext() 返回 undefined');
+      return undefined;
+    }
+    if (options.context === undefined) return undefined;
+    // 不 try/catch:getter 抛错说明上下文从根上有问题,让错误正常上抛,
+    // 不把真 bug 推迟到下游空指针.也不主动 untrack —— 响应式上下文内调用
+    // 收集依赖是用户的合理预期(context 变了应重触发 watch).
+    return resolveContext(options.context);
+  };
+
   // ====== $destroy ======
+  // 幂等:只执行一次(再次调用直接返回).
+  // 若当前 entered,自动先 $leave —— 触发 leave hook / page:leave / plugin leave,
+  // 保证 entered → destroyed 不会跳过 leave 语义.之后再 stop effectScope.
   scope.$destroy = function () {
     if (scope.$disposed) return;
+    if (controller.isEntered()) {
+      controller.runLeave();
+    }
     scope.$status.mounted = false;
     scope.$status.active = false;
     clearAllIntervals();
@@ -486,7 +513,11 @@ function createPageScopeInstance(id, options, instance, injected) {
     // effectScope.stop() 一键释放所有 watch / computed
     // (包括 plugin 内创建的 —— 因为 plugin install 也在 effectScope 内)
     effectScopeRef.stop();
-    scopeRegistry.delete(id);
+    // self-evict: 销毁链尾部(leave → stop → disposed → evict)从 registry 摘除自己.
+    // cached === scope 守卫不能省 —— 只删自己这个实例,防止删掉已被新实例顶替的
+    // 同 id 条目(否则 destroy 旧 scope 会误删 registry 里的新 scope).
+    var cached = scopeRegistry.get(id);
+    if (cached === scope) scopeRegistry.delete(id);
   };
 
   // ====== 第二阶段:plugin 安装 ======
@@ -505,14 +536,11 @@ function createPageScopeInstance(id, options, instance, injected) {
     });
   });
 
-  // 返回 scope 本身 + 三个内部生命周期触发器
-  // (触发器不挂在 scope 上,只在 useScope() 内通过闭包访问)
-  return {
-    scope: scope,
-    runInit: runInit,
-    runEnter: runEnter,
-    runLeave: runLeave,
-  };
+  // 返回 scope.
+  // v0.1 中三个生命周期触发器是闭包私有的; v0.2 起统一通过 scope.$init /
+  // scope.$enter / scope.$leave 暴露为公共方法, 不再需要从 createPageScopeInstance
+  // 单独返回. 库内部 useScope() 直接调用 scope.$xxx, 行为与 v0.1 一致.
+  return { scope: scope };
 }
 
 // ====== definePageScope ======
@@ -550,11 +578,18 @@ function definePageScope(id, options) {
 
     var scope;
     var isFirstBinding = false;
-    // 仅首次创建时持有内部生命周期触发器,非首次绑定不需要
-    var created = null;
 
-    if (scopeRegistry.has(id)) {
-      scope = scopeRegistry.get(id);
+    var cachedScope = scopeRegistry.has(id) ? scopeRegistry.get(id) : null;
+    // 命中缓存但已销毁:摘除旧条目,走重建分支拿全新 scope.
+    // (registry 缓存 + $destroy 摘除存在时序窗口 —— 若 cached 已 disposed,
+    // 复用它只会得到一个被冻结的死 scope,故视同未命中.)
+    if (cachedScope && cachedScope.$disposed) {
+      scopeRegistry.delete(id);
+      cachedScope = null;
+    }
+
+    if (cachedScope) {
+      scope = cachedScope;
       // 非首次绑定时如果还传了 injected,提示用户:注入只在 owner 处生效
       if (injected && Object.keys(injected).length > 0) {
         warn(
@@ -566,40 +601,48 @@ function definePageScope(id, options) {
       // instance + injected 传给 createPageScopeInstance ——
       // auto bridge 和 explicit injection 必须在 scope 内部完成,
       // 时序上要早于 getters / actions / watch / plugin install / init.
-      created = createPageScopeInstance(id, options, instance, injected);
+      var created = createPageScopeInstance(id, options, instance, injected);
       scope = created.scope;
       scopeRegistry.set(id, scope);
       isFirstBinding = true;
-
-      // init 钩子 —— 只在 scope 首次创建时调用,与 vue-page-store v0.5 语义一致.
-      // 已包进 effectScopeRef.run,init 里手写的 watch 也会被 scope.stop() 回收.
-      //
-      // 防御:init 抛错时自毁 scope,避免 registry 里残留半初始化的 scope.
-      // $destroy 会触发 effectScope.stop / plugin destroy hooks / registry.delete.
-      try {
-        created.runInit();
-      } catch (err) {
-        scope.$destroy();
-        throw err;
-      }
     }
 
     // ====== 生命周期绑定 —— 单 owner 模型 ======
     // 仅首次绑定的组件挂生命周期钩子.
     // 子组件如果误调 useXxxScope(),会收到 warning,且不会触发重复 enter/leave.
     if (isFirstBinding) {
+      // ====== 生命周期模式 (v0.2): 'auto' (默认) | 'manual' ======
+      // 一个开关控制所有"自动行为",保持清晰边界(不在每个 hook 内单独判断):
+      //   auto   —— 自动调用 $init,并注册 onMounted/onActivated/onDeactivated/
+      //             onBeforeUnmount 自动驱动 $enter/$leave/$destroy. 行为与 v0.1 完全一致.
+      //   manual —— 库一律不注册任何 Vue 生命周期 hook,也不自动 $init.
+      //             scope 创建即可用(plugin 已就绪),但 $init/$enter/$leave/$destroy
+      //             全部等 adapter 显式调用.即使开发者混用,Vue hook 也不会偷偷触发.
+      // 注意:provide 不在开关内 —— 子组件 injectPageScope() 在两种模式下都要能用.
+      if (options.lifecycle !== 'manual') {
+        // init 钩子 —— 只在 scope 首次创建时调用,与 vue-page-store v0.5 语义一致.
+        // 已包进 effectScopeRef.run,init 里手写的 watch 也会被 scope.stop() 回收.
+        // 防御:init 抛错时自毁 scope,避免 registry 里残留半初始化的 scope.
+        try {
+          scope.$init();
+        } catch (err) {
+          scope.$destroy();
+          throw err;
+        }
+
+        // onMounted + onActivated 双挂,用 _entered 状态机去重
+        // 处理 keep-alive 首次激活时 onMounted 和 onActivated 双响炮的情况
+        onMounted(function () { scope.$enter(); });
+        onActivated(function () { scope.$enter(); });
+        onDeactivated(function () { scope.$leave(); });
+
+        onBeforeUnmount(function () {
+          scope.$leave();
+          scope.$destroy();
+        });
+      }
+
       provide(PAGE_SCOPE_KEY, scope);
-
-      // onMounted + onActivated 双挂,用 _entered 状态机去重
-      // 处理 keep-alive 首次激活时 onMounted 和 onActivated 双响炮的情况
-      onMounted(function () { created.runEnter(); });
-      onActivated(function () { created.runEnter(); });
-      onDeactivated(function () { created.runLeave(); });
-
-      onBeforeUnmount(function () {
-        created.runLeave();
-        scope.$destroy();
-      });
     } else {
       warn(
         'scope "' + id + '" 已存在.useXxxScope() 建议只在页面级组件调用,' +

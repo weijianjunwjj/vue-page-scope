@@ -15,6 +15,7 @@ import type {
   computed,
   watch,
   effectScope,
+  Ref,
 } from 'vue';
 
 type AnyRecord = Record<string, any>;
@@ -49,6 +50,7 @@ export interface PageScopeRuntimeContext {
 export interface PageScopeBase<
   S extends AnyRecord = AnyRecord,
   SO extends AnyRecord = AnyRecord,
+  C = unknown,
 > {
   readonly $id: string;
   readonly $state: S;
@@ -68,7 +70,46 @@ export interface PageScopeBase<
   $off(event: string, handler?: (payload?: any) => void): void;
 
   $setInterval(fn: () => void, delay: number): () => void;
+
+  // ====== v0.2: 生命周期触发器(公共方法) ======
+  // 库内部仍会在 onMounted / onActivated / onDeactivated / onBeforeUnmount 自动调用
+  // 这些方法 —— Vue Router + keep-alive 场景行为与 v0.1 完全一致.
+  //
+  // 跨运行时 adapter(如 uni-app 小程序)可以在 onPageShow / onPageHide / onLoad /
+  // onUnload 等宿主生命周期里显式调用这些方法,驱动 scope 进入对应状态.
+  //
+  // 状态机: created → inited → entered ⇄ left → destroyed
+  // 幂等规则:
+  // - $init: options.init 只执行一次,重复调用 dev warning 并忽略.
+  // - $enter: destroyed 后无效; 已 entered 时忽略.
+  // - $leave: 仅 entered 状态触发,其他状态忽略.
+  // - $destroy: 只执行一次; 若当前 entered 会自动先 $leave 再释放 effectScope.
+  /** 手动触发 options.init,只执行一次,重复调用 dev warning */
+  $init(): void;
+  /** 手动触发 options.enter,destroyed 后无效,已 enter 时 no-op */
+  $enter(): void;
+  /** 手动触发 options.leave,仅 entered 状态触发,其他状态 no-op */
+  $leave(): void;
+
+  /** 销毁 scope,只执行一次; 若当前 entered 自动先 $leave,再释放 effectScope */
   $destroy(): void;
+
+  // ====== v0.2: context 通道(公共方法) ======
+  // 解析 options.context(T | Ref<T> | () => T)为 T。每次调用惰性 resolve,不缓存,
+  // 因此 Ref / getter 形态始终反映最新值。adapter 可借此把宿主路由参数等运行时上下文
+  // 喂给 scope,供 init/enter/leave 与业务读取。
+  //
+  // 与 v0.1 useScope(injected) 互不干扰:context 走 $getContext(),injected 走
+  // scope.<key> 顶层访问,两条访问面不重叠、无覆盖关系。
+  //
+  // 行为说明:
+  // - 未配置 options.context 时返回 undefined。
+  // - destroyed 后返回 undefined(并打 dev warning)。
+  // - 在响应式上下文(watch / computed)内调用时,会收集 getter 内访问的响应式依赖;
+  //   如需避免追踪,调用方自行用 untrack()。
+  // - getter 抛错不被吞掉,正常向上抛出(getter 抛错说明上下文从根上有问题)。
+  /** 解析 options.context 为 T;未配置或 destroyed 后返回 undefined */
+  $getContext(): C | undefined;
 }
 
 // ====== 注入字段类型(只读) ======
@@ -82,8 +123,9 @@ export type PageScope<
   SO extends AnyRecord = AnyRecord,
   G extends AnyRecord = AnyRecord,
   A extends AnyRecord = AnyRecord,
-  I extends AnyRecord = {}
-> = PageScopeBase<S, SO> & S & GetterResults<G> & ActionMethods<A> & ReadonlyInjected<I>;
+  I extends AnyRecord = {},
+  C = unknown
+> = PageScopeBase<S, SO, C> & S & GetterResults<G> & ActionMethods<A> & ReadonlyInjected<I>;
 
 // ====== watch handler 类型 ======
 export type PageScopeWatchHandler<TScope> =
@@ -111,6 +153,30 @@ export interface PageScopePlugin<
   };
 }
 
+// ====== 生命周期模式 (v0.2) ======
+// 'auto' (默认): 库注册 Vue 组件生命周期 hook,自动驱动 init/enter/leave/destroy.
+//                Vue Router + keep-alive 场景,行为与 v0.1 完全一致.
+// 'manual':      库一律不注册任何 Vue 生命周期 hook,也不自动 init.
+//                $init / $enter / $leave / $destroy 全部由 adapter 显式调用.
+//                适用于 uni-app 小程序 / 微前端 / 自研路由等需要外部接管生命周期的场景.
+// 模式名保持运行时无关,不绑定任何具体宿主语义.
+export type ScopeLifecycleMode = 'auto' | 'manual';
+
+// ====== context 通道 (v0.2) ======
+// options.context 接受三种形态,通过 scope.$getContext() 解析为 C:
+//   - 静态值 T
+//   - Ref<T>(解包 .value)
+//   - getter () => T(调用取值)
+// 注意:context 为函数时一律视为 getter;若要把"函数本身"作为上下文数据,
+//       请包一层 () => fn 或用 ref(fn)。
+export type ScopeContextSource<C> = C | Ref<C> | (() => C);
+
+// 从 context 源类型反推解析后类型(供需要显式计算的场景使用)。
+export type ResolveContext<X> =
+  X extends () => infer R ? R :
+  X extends Ref<infer V> ? V :
+  X;
+
 // ====== definePageScope options ======
 export interface DefinePageScopeOptions<
   S extends AnyRecord,
@@ -118,10 +184,17 @@ export interface DefinePageScopeOptions<
   G extends AnyRecord,
   A extends AnyRecord,
   I extends AnyRecord = {},
-  TScope = PageScope<S, SO, G, A, I>
+  C = unknown,
+  TScope = PageScope<S, SO, G, A, I, C>
 > {
   /** 业务状态工厂函数(必填) */
   state(): S;
+
+  /** 生命周期模式,默认 'auto'.见 ScopeLifecycleMode. */
+  lifecycle?: ScopeLifecycleMode;
+
+  /** 适配器上下文:静态值 T / Ref<T> / getter () => T。通过 scope.$getContext() 解析读取. */
+  context?: ScopeContextSource<C>;
 
   /** 页面输入 / 原始返回工厂函数 */
   source?(): SO;
@@ -170,11 +243,12 @@ export function definePageScope<
   SO extends AnyRecord = {},
   G extends AnyRecord = {},
   A extends AnyRecord = {},
-  I extends AnyRecord = {}
+  I extends AnyRecord = {},
+  C = unknown
 >(
   id: string,
-  options: DefinePageScopeOptions<S, SO, G, A, I>
-): (injected?: I) => PageScope<S, SO, G, A, I>;
+  options: DefinePageScopeOptions<S, SO, G, A, I, C>
+): (injected?: I) => PageScope<S, SO, G, A, I, C>;
 
 /**
  * 子组件中获取当前页面 Scope
